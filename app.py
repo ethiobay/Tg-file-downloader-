@@ -65,13 +65,27 @@ def telegram_webhook():
         )
         return "OK", 200
 
+    # Get file information from documents, photos, or videos
     document = message.get("document")
+    photo = message.get("photo")
+    video = message.get("video")
 
-    if not document:
+    if document:
+        file_id_telegram = document["file_id"]
+        filename = document.get("file_name", "file")
+
+    elif photo:
+        # Use the highest-quality version of the photo
+        file_id_telegram = photo[-1]["file_id"]
+        filename = f"photo_{uuid.uuid4().hex[:8]}.jpg"
+
+    elif video:
+        file_id_telegram = video["file_id"]
+        filename = video.get("file_name", f"video_{uuid.uuid4().hex[:8]}.mp4")
+
+    else:
         return "OK", 200
 
-    file_id_telegram = document["file_id"]
-    filename = document.get("file_name", "file")
     safe_filename = os.path.basename(filename)
 
     # Get Telegram file information
@@ -92,7 +106,7 @@ def telegram_webhook():
 
     telegram_path = result["result"]["file_path"]
 
-    # Download from Telegram
+    # Download the file from Telegram
     download_url = (
         f"https://api.telegram.org/file/bot"
         f"{BOT_TOKEN}/{telegram_path}"
