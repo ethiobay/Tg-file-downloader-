@@ -1,15 +1,22 @@
 import os
 import uuid
-import threading
+import requests
 
-from flask import Flask, send_from_directory
-from telegram import Update
-from telegram.ext import Application, MessageHandler, ContextTypes, filters
+from flask import Flask, request, send_from_directory
 
 app = Flask(__name__)
 
 DOWNLOAD_DIR = "downloads"
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+
+BOT_TOKEN = os.environ["BOT_TOKEN"]
+BASE_URL = os.environ["BASE_URL"].rstrip("/")
+
+
+def telegram_api(method, data=None):
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/{method}"
+    response = requests.post(url, data=data, timeout=60)
+    return response.json()
 
 
 @app.route("/")
@@ -30,70 +37,118 @@ def download(file_id):
     return "File not found", 404
 
 
-async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    message = update.message
+@app.route("/telegram", methods=["POST"])
+def telegram_webhook():
+    update = request.get_json(silent=True)
 
-    if not message or not message.document:
-        return
+    if not update:
+        return "OK", 200
 
-    document = message.document
+    message = update.get("message")
 
-    file = await context.bot.get_file(document.file_id)
+    if not message:
+        return "OK", 200
 
-    file_id = str(uuid.uuid4())[:8]
+    chat_id = message["chat"]["id"]
 
-    filename = document.file_name or "file"
+    # /start
+    if message.get("text") == "/start":
+        telegram_api(
+            "sendMessage",
+            {
+                "chat_id": chat_id,
+                "text": (
+                    "👋 Send me a file and I'll give you "
+                    "a browser download link."
+                )
+            }
+        )
+        return "OK", 200
+
+    document = message.get("document")
+
+    if not document:
+        return "OK", 200
+
+    file_id_telegram = document["file_id"]
+    filename = document.get("file_name", "file")
     safe_filename = os.path.basename(filename)
 
-    saved_name = f"{file_id}_{safe_filename}"
+    # Get Telegram file information
+    result = telegram_api(
+        "getFile",
+        {"file_id": file_id_telegram}
+    )
+
+    if not result.get("ok"):
+        telegram_api(
+            "sendMessage",
+            {
+                "chat_id": chat_id,
+                "text": "❌ I couldn't access that file."
+            }
+        )
+        return "OK", 200
+
+    telegram_path = result["result"]["file_path"]
+
+    # Download from Telegram
+    download_url = (
+        f"https://api.telegram.org/file/bot"
+        f"{BOT_TOKEN}/{telegram_path}"
+    )
+
+    file_response = requests.get(
+        download_url,
+        timeout=120
+    )
+
+    if file_response.status_code != 200:
+        telegram_api(
+            "sendMessage",
+            {
+                "chat_id": chat_id,
+                "text": "❌ I couldn't download that file."
+            }
+        )
+        return "OK", 200
+
+    unique_id = str(uuid.uuid4())[:8]
+
+    saved_name = f"{unique_id}_{safe_filename}"
     filepath = os.path.join(DOWNLOAD_DIR, saved_name)
 
-    await file.download_to_drive(filepath)
+    with open(filepath, "wb") as file:
+        file.write(file_response.content)
 
-    base_url = os.environ["BASE_URL"].rstrip("/")
+    download_link = f"{BASE_URL}/download/{unique_id}"
 
-    link = f"{base_url}/download/{file_id}"
-
-    await message.reply_text(
-        f"✅ File ready!\n\n"
-        f"📁 {safe_filename}\n\n"
-        f"⬇️ Download:\n{link}"
+    telegram_api(
+        "sendMessage",
+        {
+            "chat_id": chat_id,
+            "text": (
+                f"✅ File ready!\n\n"
+                f"📁 {safe_filename}\n\n"
+                f"⬇️ Download:\n{download_link}"
+            )
+        }
     )
 
+    return "OK", 200
 
-def run_web_server():
-    port = int(os.environ.get("PORT", 5000))
 
-    app.run(
-        host="0.0.0.0",
-        port=port,
-        use_reloader=False
+def setup_webhook():
+    webhook_url = f"{BASE_URL}/telegram"
+
+    result = telegram_api(
+        "setWebhook",
+        {
+            "url": webhook_url
+        }
     )
 
-
-def run_bot():
-    token = os.environ["BOT_TOKEN"]
-
-    application = Application.builder().token(token).build()
-
-    application.add_handler(
-        MessageHandler(
-            filters.Document.ALL,
-            handle_file
-        )
-    )
-
-    application.run_polling()
+    print("Webhook setup:", result)
 
 
-if __name__ == "__main__":
-    # Flask runs in the background.
-    # Telegram runs in the MAIN thread.
-    web_thread = threading.Thread(
-        target=run_web_server,
-        daemon=True
-    )
-
-    web_thread.start()
-
-    run_bot()
+setup_webhook()
